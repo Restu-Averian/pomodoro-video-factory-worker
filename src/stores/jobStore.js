@@ -3,12 +3,11 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 
 const JOB_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const STATES = new Set(['queued', 'rendering', 'validating', 'completed', 'failed', 'cancelled', 'delivered', 'cleaned', 'interrupted']);
+const STATES = new Set(['receiving', 'queued', 'rendering', 'validating', 'completed', 'failed', 'cancelled', 'delivered', 'cleaned', 'interrupted']);
 
 function createJobStore(config) {
-  console.log('createJobStore',config)
   const jobs = new Map();
-  fs.mkdirSync(config.directories.jobs, { recursive: true });
+  for (const directory of Object.values(config.directories)) fs.mkdirSync(directory, { recursive: true });
 
   function assertJobId(jobId) {
     if (!JOB_ID.test(jobId)) throw new Error('Invalid job ID');
@@ -22,7 +21,6 @@ function createJobStore(config) {
   function writeJob(job) {
     const file = jobPath(job.id);
     const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-    console.log('tt',temporary)
     fs.writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
     fs.renameSync(temporary, file);
   }
@@ -70,7 +68,7 @@ function createJobStore(config) {
         // ponytail: invalid records are ignored; add quarantine handling only when operators need recovery tooling.
       }
     }
-    for (const job of listJobs()) if (job.state === 'rendering' || job.state === 'validating') updateJob(job.id, { state: 'interrupted', interruptionReason: 'Worker restarted before completion' });
+    for (const job of listJobs()) if (job.state === 'receiving' || job.state === 'rendering' || job.state === 'validating') updateJob(job.id, { state: 'interrupted', interruptionReason: 'Worker restarted before completion' });
     return listJobs();
   }
 

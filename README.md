@@ -1,6 +1,6 @@
 # Niititu Focus Remote Render Worker
 
-Foundation worker untuk render Pomodoro jarak jauh melalui Tailscale. Pada fase ini worker hanya menyediakan health check, autentikasi, dan persistence job JSON; worker belum menerima upload atau menjalankan FFmpeg render.
+Worker untuk render Pomodoro jarak jauh melalui Tailscale. Worker menerima manifest render portable + source files dari Mac backend, menyimpan job JSON, lalu menjalankan pipeline FFmpeg yang sama di ASUS.
 
 ## Deploy manual di Windows
 
@@ -31,5 +31,37 @@ Status terautentikasi:
 ```sh
 curl -H "Authorization: Bearer YOUR_TOKEN" http://100.98.130.76:4010/api/status
 ```
+
+Job status:
+
+```sh
+curl -H "Authorization: Bearer YOUR_TOKEN" http://100.98.130.76:4010/api/jobs/JOB_ID
+```
+
+## Upload render
+
+`POST /api/jobs` memakai `multipart/form-data`:
+
+- field `manifest`: JSON render manifest versi 1
+- file fields: logical path seperti `assets/focus-video.mp4`
+
+Worker menolak logical path yang bukan `assets/<filename>` agar upload tidak bisa keluar dari folder job. File disimpan di:
+
+```text
+%WORKER_ROOT%\uploads\<jobId>\assets\
+%WORKER_ROOT%\temp\<jobId>\
+%WORKER_ROOT%\outputs\<jobId>\
+```
+
+## Manual integration test pendek
+
+1. Jalankan worker di ASUS: `npm start`.
+2. Dari Mac, pastikan health OK: `curl http://100.98.130.76:4010/health`.
+3. Di `be/.env` Mac, set `RENDER_MODE=remote`, `REMOTE_WORKER_URL=http://100.98.130.76:4010`, dan token yang sama.
+4. Jalankan Mac backend + frontend.
+5. Buat project pendek atau preview dengan focus/break video, focus/break audio, dan optional bell.
+6. Klik `Generate Preview`.
+7. Cek ASUS: file muncul di `%WORKER_ROOT%\uploads\<jobId>\assets\`, job JSON muncul di `%WORKER_ROOT%\jobs\`, dan output FFmpeg dibuat di `%WORKER_ROOT%\outputs\<jobId>\`.
+8. Cek frontend: progress berubah dari `Uploading Sources` ke `Queued`/`Rendering`/`Completed` atau `Failed`.
 
 Untuk menghentikan worker yang berjalan di jendela Command Prompt, tekan `Ctrl+C`. Task Scheduler sengaja belum dikonfigurasi.
