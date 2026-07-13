@@ -1,4 +1,4 @@
 @echo off
-if not exist D:\NiitituWorker\logs mkdir D:\NiitituWorker\logs
-cd /d D:\NiitituWorker\app
-npm start >> D:\NiitituWorker\logs\worker.log 2>&1
+if not exist D:\Projects\pomodoro-video-factory-worker\logs mkdir D:\Projects\pomodoro-video-factory-worker\logs
+cd /d D:\Projects\pomodoro-video-factory-worker\app
+npm start >> D:\Projects\pomodoro-video-factory-worker\logs\worker.log 2>&1

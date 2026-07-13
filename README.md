@@ -4,10 +4,10 @@ Foundation worker untuk render Pomodoro jarak jauh melalui Tailscale. Pada fase 
 
 ## Deploy manual di Windows
 
-1. Salin atau clone folder `worker` ke `D:\NiitituWorker\app`.
+1. Salin atau clone folder `worker` ke `D:\Projects\pomodoro-video-factory-worker\app`.
 2. Instal Node.js LTS, FFmpeg, dan ffprobe; pastikan `ffmpeg -version` dan `ffprobe -version` bekerja dari Command Prompt.
-3. Di `D:\NiitituWorker\app`, jalankan `npm install`.
-4. Salin `.env.example` menjadi `.env`, lalu isi `WORKER_API_TOKEN` dengan secret kuat. Pastikan `WORKER_ROOT=D:\NiitituWorker`.
+3. Di `D:\Projects\pomodoro-video-factory-worker\app`, jalankan `npm install`.
+4. Salin `.env.example` menjadi `.env`, lalu isi `WORKER_API_TOKEN` dengan secret kuat. Pastikan `WORKER_ROOT=D:\Projects\pomodoro-video-factory-worker`.
 5. Jalankan manual dengan `start-worker.cmd` atau `npm start`.
 
 Folder `jobs`, `uploads`, `temp`, `outputs`, dan `logs` dibuat dari `WORKER_ROOT`. Jangan meneruskan port 4010 ke internet publik; akses hanya melalui Tailscale/private network.

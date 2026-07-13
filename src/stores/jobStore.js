@@ -6,6 +6,7 @@ const JOB_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const STATES = new Set(['queued', 'rendering', 'validating', 'completed', 'failed', 'cancelled', 'delivered', 'cleaned', 'interrupted']);
 
 function createJobStore(config) {
+  console.log('createJobStore',config)
   const jobs = new Map();
   fs.mkdirSync(config.directories.jobs, { recursive: true });
 
@@ -21,6 +22,7 @@ function createJobStore(config) {
   function writeJob(job) {
     const file = jobPath(job.id);
     const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+    console.log('tt',temporary)
     fs.writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
     fs.renameSync(temporary, file);
   }
