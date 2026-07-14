@@ -109,7 +109,7 @@ function uploadForm(manifest, files = {}) {
   const form = new FormData();
   form.append('manifest', JSON.stringify(manifest));
   for (const [logicalPath, value] of Object.entries(files)) {
-    form.append(logicalPath, new Blob([value || 'x']), path.basename(logicalPath));
+    form.append('assets', new Blob([value || 'x']), path.basename(logicalPath));
   }
   return form;
 }
@@ -129,7 +129,9 @@ test('render job submission validates auth, manifest, path traversal, and missin
     unsafe.assets.focusVideo = '../focus-video.mp4';
     assert.equal((await fetch(`${url}/api/jobs`, { method: 'POST', headers, body: uploadForm(unsafe) })).status, 400);
 
-    assert.equal((await fetch(`${url}/api/jobs`, { method: 'POST', headers, body: uploadForm(manifest, { 'assets/focus-video.mp4': 'video' }) })).status, 400);
+    const missing = await fetch(`${url}/api/jobs`, { method: 'POST', headers, body: uploadForm(manifest, { 'assets/focus-video.mp4': 'video' }) });
+    assert.equal(missing.status, 400);
+    assert.match((await missing.json()).error, /Missing source files/);
   });
 });
 
