@@ -7,7 +7,8 @@ const { createConfig } = require('../src/config');
 const { createJobStore } = require('../src/stores/jobStore');
 const { createQueueManager } = require('../src/services/queueManager');
 const { createApp } = require('../src/app');
-const { resolveRenderManifest } = require('../src/services/renderService');
+const { EventEmitter } = require('node:events');
+const { resolveRenderManifest, renderJob, validateRenderedOutput } = require('../src/services/renderService');
 
 function makeWorker() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'niititu-worker-'));
@@ -211,4 +212,172 @@ test('queue runs only one render at a time', async (t) => {
 
   assert.equal(maxActive, 1);
   assert.equal(worker.store.listJobs().filter((job) => job.state === 'completed').length, 2);
+});
+
+test('output endpoint rejects unauthenticated, unknown, incomplete, and unsafe jobs', async (t) => {
+  const worker = makeWorker();
+  t.after(() => fs.rmSync(worker.root, { recursive: true, force: true }));
+  const outputFile = path.join(worker.config.directories.outputs, 'outside.mp4');
+  fs.writeFileSync(outputFile, 'video');
+  const queued = worker.store.createJob({ kind: 'render', state: 'queued' });
+  const unsafe = worker.store.createJob({
+    kind: 'render',
+    state: 'completed',
+    validation: { succeeded: true },
+    outputPath: outputFile,
+    outputDir: path.join(worker.config.directories.outputs, unsafeJobDirName()),
+  });
+
+  await withServer(worker.app, async (url) => {
+    const headers = { Authorization: 'Bearer test-token' };
+    assert.equal((await fetch(`${url}/api/jobs/${queued.id}/output`)).status, 401);
+    assert.equal((await fetch(`${url}/api/jobs/${queued.id}/output`, { headers: { Authorization: 'Bearer wrong-token' } })).status, 401);
+    assert.equal((await fetch(`${url}/api/jobs/00000000-0000-4000-8000-000000000000/output`, { headers })).status, 404);
+    assert.equal((await fetch(`${url}/api/jobs/${queued.id}/output`, { headers })).status, 409);
+    assert.equal((await fetch(`${url}/api/jobs/${unsafe.id}/output`, { headers })).status, 409);
+  });
+});
+
+test('output endpoint streams a completed validated file', async (t) => {
+  const worker = makeWorker();
+  t.after(() => fs.rmSync(worker.root, { recursive: true, force: true }));
+  const outputDir = path.join(worker.config.directories.outputs, 'job-output');
+  fs.mkdirSync(outputDir, { recursive: true });
+  const outputPath = path.join(outputDir, 'final test.mp4');
+  fs.writeFileSync(outputPath, 'remote-video');
+  const job = worker.store.createJob({
+    kind: 'render',
+    state: 'completed',
+    validation: { succeeded: true },
+    outputDir,
+    outputPath,
+  });
+
+  await withServer(worker.app, async (url) => {
+    const response = await fetch(`${url}/api/jobs/${job.id}/output`, {
+      headers: { Authorization: 'Bearer test-token' },
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'video/mp4');
+    assert.equal(response.headers.get('content-length'), String(Buffer.byteLength('remote-video')));
+    assert.match(response.headers.get('content-disposition'), /filename="final test\.mp4"/);
+    assert.equal(await response.text(), 'remote-video');
+  });
+});
+
+function unsafeJobDirName() {
+  return 'nested';
+}
+
+function fakeFfprobe(stdout, exitCode = 0) {
+  return () => {
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    process.nextTick(() => {
+      if (stdout) child.stdout.emit('data', Buffer.from(stdout));
+      child.emit('close', exitCode);
+    });
+    return child;
+  };
+}
+
+test('ffprobe validation accepts a usable rendered output', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'niititu-validation-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const outputPath = path.join(dir, 'final.mp4');
+  fs.writeFileSync(outputPath, 'video');
+  const metadata = {
+    format: { duration: '15.1' },
+    streams: [
+      { codec_type: 'video', width: 1920, height: 1080, codec_name: 'h264' },
+      { codec_type: 'audio', codec_name: 'aac' },
+    ],
+  };
+
+  const validation = await validateRenderedOutput({
+    outputPath,
+    expectedDurationSeconds: 15,
+    expectAudio: true,
+    spawnImpl: fakeFfprobe(JSON.stringify(metadata)),
+  });
+
+  assert.equal(validation.succeeded, true);
+  assert.equal(validation.width, 1920);
+  assert.equal(validation.height, 1080);
+  assert.equal(validation.videoCodec, 'h264');
+  assert.equal(validation.audioCodec, 'aac');
+});
+
+test('validation failure marks a worker render job failed', async (t) => {
+  const worker = makeWorker();
+  t.after(() => fs.rmSync(worker.root, { recursive: true, force: true }));
+  const uploadDir = path.join(worker.root, 'uploads', 'job');
+  fs.mkdirSync(path.join(uploadDir, 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(uploadDir, 'assets', 'CormorantGaramond-Italic.ttf'), 'font');
+  const outputDir = path.join(worker.root, 'outputs', 'job');
+  fs.mkdirSync(outputDir, { recursive: true });
+  const outputPath = path.join(outputDir, 'remote-test.mp4');
+  fs.writeFileSync(outputPath, 'video');
+  const job = worker.store.createJob({
+    state: 'queued',
+    manifest: testManifest(),
+    uploadDir,
+    outputDir,
+    tempDir: path.join(worker.root, 'temp', 'job'),
+  });
+
+  await renderJob({
+    config: worker.config,
+    store: worker.store,
+    jobId: job.id,
+    executeRenderPipelineImpl: async () => outputPath,
+    spawnImpl: fakeFfprobe(JSON.stringify({ format: { duration: '15' }, streams: [] })),
+  });
+
+  const failed = worker.store.getJob(job.id);
+  assert.equal(failed.state, 'failed');
+  assert.equal(failed.currentStep, 'Failed');
+  assert.match(failed.errorMessage, /video stream/i);
+  assert.equal(failed.validation.succeeded, false);
+});
+
+test('successful validation marks a worker render job completed', async (t) => {
+  const worker = makeWorker();
+  t.after(() => fs.rmSync(worker.root, { recursive: true, force: true }));
+  const uploadDir = path.join(worker.root, 'uploads', 'job');
+  fs.mkdirSync(path.join(uploadDir, 'assets'), { recursive: true });
+  fs.writeFileSync(path.join(uploadDir, 'assets', 'CormorantGaramond-Italic.ttf'), 'font');
+  const outputDir = path.join(worker.root, 'outputs', 'job');
+  fs.mkdirSync(outputDir, { recursive: true });
+  const outputPath = path.join(outputDir, 'remote-test.mp4');
+  fs.writeFileSync(outputPath, 'video');
+  const job = worker.store.createJob({
+    state: 'queued',
+    manifest: testManifest(),
+    uploadDir,
+    outputDir,
+    tempDir: path.join(worker.root, 'temp', 'job'),
+  });
+  const metadata = {
+    format: { duration: '15' },
+    streams: [
+      { codec_type: 'video', width: 1920, height: 1080, codec_name: 'h264' },
+      { codec_type: 'audio', codec_name: 'aac' },
+    ],
+  };
+
+  await renderJob({
+    config: worker.config,
+    store: worker.store,
+    jobId: job.id,
+    executeRenderPipelineImpl: async () => outputPath,
+    spawnImpl: fakeFfprobe(JSON.stringify(metadata)),
+  });
+
+  const completed = worker.store.getJob(job.id);
+  assert.equal(completed.state, 'completed');
+  assert.equal(completed.currentStep, 'Completed');
+  assert.equal(completed.validation.succeeded, true);
+  assert.equal(completed.outputPath, outputPath);
 });

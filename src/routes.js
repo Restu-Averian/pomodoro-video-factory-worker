@@ -39,6 +39,19 @@ function validJobId(req, res, next) {
   next();
 }
 
+function isInside(root, filePath) {
+  const resolvedRoot = path.resolve(root);
+  const resolvedFile = path.resolve(filePath);
+  return (
+    resolvedFile !== resolvedRoot &&
+    resolvedFile.startsWith(`${resolvedRoot}${path.sep}`)
+  );
+}
+
+function safeDispositionName(filename) {
+  return path.basename(filename || "render.mp4").replace(/[\r\n"]/g, "_");
+}
+
 function createRoutes({ config, store, queue, availability }) {
   const router = express.Router();
   const storage = multer.diskStorage({
@@ -86,6 +99,44 @@ function createRoutes({ config, store, queue, availability }) {
     const job = store.getJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: "Job not found" });
     res.json(job);
+  });
+  router.get("/jobs/:jobId/output", validJobId, (req, res) => {
+    const job = store.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: "Job not found" });
+    if (job.state !== "completed" || job.validation?.succeeded !== true)
+      return res.status(409).json({ error: "Job output is not ready" });
+    const outputPath = job.outputPath;
+    const outputDir =
+      job.outputDir || path.join(config.directories.outputs, job.id);
+    if (
+      !outputPath ||
+      !isInside(config.directories.outputs, outputPath) ||
+      !isInside(outputDir, outputPath) ||
+      !fs.existsSync(outputPath)
+    )
+      return res.status(409).json({ error: "Job output is unavailable" });
+    const stats = fs.statSync(outputPath);
+    if (!stats.isFile() || stats.size <= 0)
+      return res.status(409).json({ error: "Job output is unavailable" });
+
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", String(stats.size));
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${safeDispositionName(outputPath)}"`,
+    );
+    const stream = fs.createReadStream(outputPath);
+    let closed = false;
+    req.on("close", () => {
+      closed = true;
+      stream.destroy();
+    });
+    stream.on("error", (error) => {
+      if (!closed && !res.headersSent)
+        return res.status(500).json({ error: error.message });
+      if (!closed) res.destroy(error);
+    });
+    stream.pipe(res);
   });
   router.post(
     "/jobs",

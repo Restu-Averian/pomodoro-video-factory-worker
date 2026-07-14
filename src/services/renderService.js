@@ -1,6 +1,14 @@
 const fs = require("node:fs");
 const path = require("node:path");
-const { executeRenderPipeline } = require("../shared/renderPipeline");
+const { spawn } = require("node:child_process");
+let executeRenderPipeline;
+try {
+  ({ executeRenderPipeline } = require("../shared/renderPipeline"));
+} catch (_) {
+  ({
+    executeRenderPipeline,
+  } = require("../../../be/src/shared/renderPipeline"));
+}
 
 const SAFE_ASSET = /^assets\/[A-Za-z0-9._ -]+$/;
 
@@ -102,7 +110,103 @@ function resolveRenderManifest(config, job) {
   };
 }
 
-async function renderJob({ config, store, jobId }) {
+function expectedDuration(manifest) {
+  return (manifest?.assets?.audioPlan || []).reduce(
+    (total, segment) => total + Number(segment.durationSeconds || 0),
+    0,
+  );
+}
+
+function runFfprobe(outputPath, spawnImpl = spawn) {
+  return new Promise((resolve, reject) => {
+    const child = spawnImpl("ffprobe", [
+      "-v",
+      "error",
+      "-print_format",
+      "json",
+      "-show_format",
+      "-show_streams",
+      outputPath,
+    ]);
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0)
+        return reject(new Error(`ffprobe failed: ${stderr || `exit ${code}`}`));
+      try {
+        resolve(JSON.parse(stdout));
+      } catch (error) {
+        reject(new Error(`ffprobe returned invalid JSON: ${error.message}`));
+      }
+    });
+  });
+}
+
+async function validateRenderedOutput({
+  outputPath,
+  expectedDurationSeconds,
+  expectAudio,
+  spawnImpl = spawn,
+}) {
+  if (!outputPath || !fs.existsSync(outputPath))
+    throw new Error("Rendered output file is missing");
+  const stats = fs.statSync(outputPath);
+  if (stats.size <= 0) throw new Error("Rendered output file is empty");
+  const probe = await runFfprobe(outputPath, spawnImpl);
+  const streams = Array.isArray(probe.streams) ? probe.streams : [];
+  const video = streams.find((stream) => stream.codec_type === "video");
+  if (!video) throw new Error("Rendered output has no video stream");
+  const duration = Number(probe.format?.duration || video.duration);
+  if (!Number.isFinite(duration) || duration <= 0)
+    throw new Error("Rendered output duration cannot be read");
+  const width = Number(video.width);
+  const height = Number(video.height);
+  if (
+    !Number.isInteger(width) ||
+    width <= 0 ||
+    !Number.isInteger(height) ||
+    height <= 0
+  )
+    throw new Error("Rendered output video dimensions are invalid");
+  if (!video.codec_name)
+    throw new Error("Rendered output video codec is missing");
+  const audio = streams.find((stream) => stream.codec_type === "audio");
+  if (expectAudio && !audio)
+    throw new Error("Rendered output has no audio stream");
+  if (expectedDurationSeconds > 0) {
+    const tolerance = Math.max(2, expectedDurationSeconds * 0.05);
+    if (Math.abs(duration - expectedDurationSeconds) > tolerance)
+      throw new Error(
+        `Rendered output duration ${duration}s differs from expected ${expectedDurationSeconds}s`,
+      );
+  }
+  return {
+    succeeded: true,
+    sizeBytes: stats.size,
+    durationSeconds: duration,
+    expectedDurationSeconds,
+    width,
+    height,
+    videoCodec: video.codec_name,
+    hasAudio: Boolean(audio),
+    audioCodec: audio?.codec_name || null,
+  };
+}
+
+async function renderJob({
+  config,
+  store,
+  jobId,
+  executeRenderPipelineImpl = executeRenderPipeline,
+  spawnImpl = spawn,
+}) {
   const started = store.updateJob(jobId, {
     state: "rendering",
     progress: 0,
@@ -124,16 +228,26 @@ async function renderJob({ config, store, jobId }) {
     }
   };
   try {
-    const finalPath = await executeRenderPipeline(manifest, onProgress);
-    if (!fs.existsSync(finalPath))
-      throw new Error("FFmpeg completed but output file was not created");
-    const stats = fs.statSync(finalPath);
+    const finalPath = await executeRenderPipelineImpl(manifest, onProgress);
+    store.updateJob(jobId, {
+      state: "validating",
+      progress: 99,
+      currentStep: "Validating",
+      outputPath: finalPath,
+    });
+    const validation = await validateRenderedOutput({
+      outputPath: finalPath,
+      expectedDurationSeconds: expectedDuration(started.manifest),
+      expectAudio: (started.manifest?.assets?.audioPlan || []).length > 0,
+      spawnImpl,
+    });
     store.updateJob(jobId, {
       state: "completed",
       progress: 100,
       currentStep: "Completed",
       outputPath: finalPath,
-      outputSizeBytes: stats.size,
+      outputSizeBytes: validation.sizeBytes,
+      validation,
       completedAt: new Date().toISOString(),
     });
   } catch (error) {
@@ -146,6 +260,7 @@ async function renderJob({ config, store, jobId }) {
       state: "failed",
       currentStep: "Failed",
       errorMessage: error.message,
+      validation: { succeeded: false, errorMessage: error.message },
       completedAt: new Date().toISOString(),
     });
   }
@@ -156,5 +271,6 @@ module.exports = {
   validateManifest,
   requiredLogicalPaths,
   resolveRenderManifest,
+  validateRenderedOutput,
   renderJob,
 };
